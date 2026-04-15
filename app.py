@@ -6,32 +6,6 @@ import hashlib
 
 st.set_page_config(page_title="PSO Image Encryption", layout="centered")
 
-ALLOWED_PASSWORD = "harsh123"
-
-# --- Session state init ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-
-# --- Authentication ---
-def login():
-    st.title("PSO Image Encryption")
-    st.subheader("Login")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if password == ALLOWED_PASSWORD:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
-
-
-def logout():
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.rerun()
-
-
 # --- Chaotic key via logistic map (seeded from image content) ---
 def logistic_map_key(seed, size, r=3.99):
     x = seed % 1.0
@@ -45,7 +19,6 @@ def logistic_map_key(seed, size, r=3.99):
 
 
 def image_seed(image):
-    # Derive a (0, 1) float from pixel sum for chaotic seeding
     total = int(np.sum(image.astype(np.int64)))
     seed  = (total % 999983) / 999983.0
     return seed if seed != 0.0 else 0.123456789
@@ -65,11 +38,10 @@ class PSO:
         self.gbest_score  = np.inf
 
     def fitness(self, particle):
-        # Maximise entropy of key particle
         hist, _ = np.histogram(particle, bins=256, range=(0, 255))
         prob = hist / np.sum(hist)
         prob = prob[prob > 0]
-        return np.sum(prob * np.log2(prob))  # negative entropy (minimised)
+        return np.sum(prob * np.log2(prob))
 
     def optimize(self):
         w, c1, c2 = 0.7, 1.5, 1.5
@@ -96,11 +68,9 @@ class PSO:
 
 
 # --- Key construction ---
-def password_to_key(password, size):
-    # Expand SHA-256 hash of password to required size
-    raw = hashlib.sha256(password.encode()).digest()
-    key = np.frombuffer(raw, dtype=np.uint8)
-    return np.tile(key, size // len(key) + 1)[:size]
+def generate_random_key(size):
+    # Replace password-based key with a random key
+    return np.random.randint(0, 256, size, dtype=np.uint8)
 
 
 def combine_keys(k1, k2, k3):
@@ -123,14 +93,10 @@ def inverse_diffuse(flat, key):
 
 
 # --- Encryption and decryption ---
-def encrypt_image(image, pso_key, password_key):
-    """
-    Steps: chaotic key (image-seeded) -> combine keys -> XOR -> diffuse.
-    Chaos key ensures a 1-pixel change produces full avalanche (ideal NPCR/UACI).
-    """
+def encrypt_image(image, pso_key, random_key):
     size      = image.size
     chaos_key = logistic_map_key(image_seed(image), size)
-    final_key = combine_keys(pso_key[:size], password_key[:size], chaos_key)
+    final_key = combine_keys(pso_key[:size], random_key[:size], chaos_key)
 
     xored    = np.bitwise_xor(image.flatten(), final_key)
     diffused = diffuse(xored, final_key)
@@ -157,49 +123,38 @@ def correlation(image):
 
 
 def npcr(img1, img2):
-    # Number of Pixels Change Rate (ideal approx. 99.6%)
     return float(np.sum(img1 != img2) / img1.size * 100)
 
 
 def uaci(img1, img2):
-    # Unified Average Changing Intensity (ideal approx. 33.4%)
     return float(
         np.mean(np.abs(img1.astype(np.float64) - img2.astype(np.float64)) / 255) * 100
     )
 
 
-# --- Entry point ---
-if not st.session_state.logged_in:
-    login()
-    st.stop()
-
+# --- Main app ---
 st.title("PSO Image Encryption")
-logout()
 
 uploaded_file = st.file_uploader("Upload a grayscale-compatible image", type=["jpg", "png", "jpeg"])
 
 if uploaded_file:
-    # Preprocess: convert to grayscale and resize to 256x256
     image = np.array(Image.open(uploaded_file).convert("L"))
     image = cv2.resize(image, (256, 256))
 
     st.image(image, caption="Original Image", clamp=True)
 
-    dimensions   = image.size
-    password_key = password_to_key(ALLOWED_PASSWORD, dimensions)
+    dimensions  = image.size
+    random_key  = generate_random_key(dimensions)
 
     with st.spinner("Running PSO optimisation..."):
         pso_key = PSO(n_particles=8, dimensions=dimensions, max_iter=15).optimize()
 
-    # Encrypt original
-    encrypted, final_key = encrypt_image(image, pso_key, password_key)
+    encrypted, final_key = encrypt_image(image, pso_key, random_key)
 
-    # Encrypt 1-pixel-modified copy for NPCR/UACI measurement
     modified       = image.copy()
     modified[0, 0] = np.uint8((int(modified[0, 0]) + 1) % 256)
-    encrypted2, _  = encrypt_image(modified, pso_key, password_key)
+    encrypted2, _  = encrypt_image(modified, pso_key, random_key)
 
-    # Decrypt to verify correctness
     decrypted = decrypt_image(encrypted, final_key)
 
     col1, col2 = st.columns(2)
@@ -208,7 +163,6 @@ if uploaded_file:
     with col2:
         st.image(decrypted, caption="Decrypted Image", clamp=True)
 
-    # Display security analysis
     st.subheader("Security Analysis")
 
     r1c1, r1c2 = st.columns(2)
@@ -223,7 +177,6 @@ if uploaded_file:
     r3c1.metric("NPCR (%)", f"{npcr(encrypted, encrypted2):.4f}", delta="Ideal = 99.6")
     r3c2.metric("UACI (%)", f"{uaci(encrypted, encrypted2):.4f}", delta="Ideal = 33.4")
 
-    # Integrity check
     if np.array_equal(image, decrypted):
         st.success("Decryption verified: output matches original.")
     else:
